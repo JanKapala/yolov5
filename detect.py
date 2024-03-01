@@ -37,6 +37,8 @@ from pathlib import Path
 
 import torch
 
+from task_solution.profiler import PROFILER
+
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLOv5 root directory
 if str(ROOT) not in sys.path:
@@ -113,8 +115,12 @@ def run(
     # Load model
     device = select_device(device)
     model = DetectMultiBackend(weights, device=device, dnn=dnn, data=data, fp16=half)
+    PROFILER.register_model(model)
+    model.from_numpy = PROFILER.profiled_func(model.from_numpy)
+
     stride, names, pt = model.stride, model.names, model.pt
-    imgsz = check_img_size(imgsz, s=stride)  # check image size
+    with PROFILER.profile_operation("check_img_size"):
+        imgsz = check_img_size(imgsz, s=stride)  # check image size
 
     # Dataloader
     bs = 1  # batch_size
@@ -133,11 +139,17 @@ def run(
     seen, windows, dt = 0, [], (Profile(device=device), Profile(device=device), Profile(device=device))
     for path, im, im0s, vid_cap, s in dataset:
         with dt[0]:
-            im = torch.from_numpy(im).to(model.device)
-            im = im.half() if model.fp16 else im.float()  # uint8 to fp16/32
-            im /= 255  # 0 - 255 to 0.0 - 1.0
+            with PROFILER.profile_operation("image to tensor"):
+                im = torch.from_numpy(im)
+            with PROFILER.profile_operation("image to device"):
+                im = im.to(model.device)
+            with PROFILER.profile_operation("image dtype to half or float"):
+                im = im.half() if model.fp16 else im.float()  # uint8 to fp16/32
+            with PROFILER.profile_operation("image normalization"):
+                im /= 255  # 0 - 255 to 0.0 - 1.0
             if len(im.shape) == 3:
-                im = im[None]  # expand for batch dim
+                with PROFILER.profile_operation("image shape expanding"):
+                    im = im[None]  # expand for batch dim
             if model.xml and im.shape[0] > 1:
                 ims = torch.chunk(im, im.shape[0], 0)
 
@@ -156,7 +168,8 @@ def run(
                 pred = model(im, augment=augment, visualize=visualize)
         # NMS
         with dt[2]:
-            pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
+            with PROFILER.profile_operation("non_max_suppression"):
+                pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
 
         # Second-stage classifier (optional)
         # pred = utils.general.apply_classifier(pred, classifier_model, im, im0s)
@@ -192,7 +205,8 @@ def run(
             annotator = Annotator(im0, line_width=line_thickness, example=str(names))
             if len(det):
                 # Rescale boxes from img_size to im0 size
-                det[:, :4] = scale_boxes(im.shape[2:], det[:, :4], im0.shape).round()
+                with PROFILER.profile_operation("Rescale boxes from img_size to im0 size"):
+                    det[:, :4] = scale_boxes(im.shape[2:], det[:, :4], im0.shape).round()
 
                 # Print results
                 for c in det[:, 5].unique():
